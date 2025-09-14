@@ -7,10 +7,17 @@ import {
 } from "./db";
 
 const TOKEN = process.env.BOT_TOKEN!;
+
+// --- Force-Join config (usernames + private IDs with optional links) ---
 const FORCE_CHANNELS = (process.env.FORCE_CHANNELS ?? "")
   .split(",")
-  .map(c => c.trim())
+  .map((c) => c.trim())
   .filter(Boolean);
+
+// same order as FORCE_CHANNELS; put invite links for private IDs
+const FORCE_LINKS = (process.env.FORCE_LINKS ?? "")
+  .split(",")
+  .map((s) => s.trim());
 
 const BONUS_AMOUNT = Number(process.env.BONUS_AMOUNT ?? 5);
 const REF_BONUS = Number(process.env.REF_BONUS ?? 2);
@@ -23,6 +30,7 @@ bot.use(limit({ timeFrame: 1000, limit: 3 }));
 
 const dstr = (d = new Date()) => d.toISOString().slice(0, 10);
 
+// ---- membership check (IDs or usernames) ----
 async function isMemberAll(userId: number) {
   if (FORCE_CHANNELS.length === 0) return true;
   for (const ch of FORCE_CHANNELS) {
@@ -32,20 +40,47 @@ async function isMemberAll(userId: number) {
         return false;
       }
     } catch {
+      // not a member or bot not admin / channel not visible
       return false;
     }
   }
   return true;
 }
 
+// ---- keyboard with proper links (invite for private IDs) ----
 function forceJoinKeyboard() {
   const kb = new InlineKeyboard();
+
   FORCE_CHANNELS.forEach((ch, i) => {
-    kb.url(`Join Channel ${i+1}`, `https://t.me/${ch.replace("@","")}`).row();
+    const explicit = FORCE_LINKS[i];
+    let url: string | undefined;
+
+    if (explicit && explicit.startsWith("http")) {
+      // explicit invite/url provided
+      url = explicit;
+    } else if (!ch.startsWith("-100")) {
+      // public username
+      url = `https://t.me/${ch.replace("@", "")}`;
+    }
+    if (url) {
+      kb.url(`Join Channel ${i + 1}`, url).row();
+    } else {
+      // private ID without invite link
+      kb.text(`Join Channel ${i + 1}`, `noop_${i}`).row();
+    }
   });
+
   kb.text("✅ मैंने सब join कर लिया", "check_join");
   return kb;
 }
+
+// optional handler so users get a clear alert on disabled buttons
+bot.callbackQuery(/noop_\d+/, async (ctx) => {
+  await ctx.answerCallbackQuery({
+    text: "इस private channel का invite link missing है. Admin से लिंक लें.",
+    show_alert: true,
+  });
+});
 
 function mainKeyboard(name: string | null) {
   return new InlineKeyboard()
@@ -75,7 +110,7 @@ bot.command("start", async (ctx) => {
 
   await ctx.reply(
     `Hi ${fname} ${tgname}, kaise ho aap? 👋\n\n` +
-    `👉 पहले इन सभी चैनल्स को join करें, फिर नीचे बटन इस्तेमाल करें।`,
+      `👉 पहले इन सभी चैनल्स को join करें, फिर नीचे बटन इस्तेमाल करें।`,
     { reply_markup: forceJoinKeyboard() }
   );
 });
@@ -83,26 +118,36 @@ bot.command("start", async (ctx) => {
 bot.callbackQuery("check_join", async (ctx) => {
   const ok = await isMemberAll(ctx.from.id);
   if (ok) {
-    // if user had a referrer, and this is first verification, credit referrer now
     const u = await getUser(ctx.from.id);
     if (u.refBy && !(u as User)._firstBonusCredited) {
       await addBalance(u.refBy, REF_BONUS);
       (u as User)._firstBonusCredited = true;
       await saveUser(u);
       try {
-        await ctx.api.sendMessage(u.refBy, `🎉 आपके रेफ़रल ${u.firstName ?? "User"} ने verify कर लिया। आपको +${REF_BONUS}!`);
+        await ctx.api.sendMessage(
+          u.refBy,
+          `🎉 आपके रेफ़रल ${u.firstName ?? "User"} ने verify कर लिया। आपको +${REF_BONUS}!`
+        );
       } catch {}
     }
     await ctx.answerCallbackQuery({ text: "✅ Verified! आपने सभी channels join कर लिए।" });
-    await ctx.editMessageText("✅ Verification complete! अब नीचे के बटनों से कमाना शुरू करें:", { reply_markup: mainKeyboard(ctx.from.first_name ?? null) });
+    await ctx.editMessageText(
+      "✅ Verification complete! अब नीचे के बटनों से कमाना शुरू करें:",
+      { reply_markup: mainKeyboard(ctx.from.first_name ?? null) }
+    );
   } else {
-    await ctx.answerCallbackQuery({ text: "❗ अभी सारे channel join नहीं दिख रहे। Join करके दुबारा दबाएँ।", show_alert: true });
+    await ctx.answerCallbackQuery({
+      text: "❗ अभी सारे channel join नहीं दिख रहे। Join करके दुबारा दबाएँ।",
+      show_alert: true,
+    });
   }
 });
 
 async function guardJoined(ctx: any) {
   if (!(await isMemberAll(ctx.from.id))) {
-    await ctx.reply("⚠️ पहले सभी Force Channels join करें, फिर try करें.", { reply_markup: forceJoinKeyboard() });
+    await ctx.reply("⚠️ पहले सभी Force Channels join करें, फिर try करें.", {
+      reply_markup: forceJoinKeyboard(),
+    });
     return false;
   }
   return true;
@@ -138,8 +183,8 @@ bot.callbackQuery("refer", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.reply(
     `👥 *Refer & Earn*\n\n` +
-    `अपना link share करें:\n${link}\n\n` +
-    `जब आपका friend verify करेगा, आपको +${REF_BONUS} मिलेगा.`,
+      `अपना link share करें:\n${link}\n\n` +
+      `जब आपका friend verify करेगा, आपको +${REF_BONUS} मिलेगा.`,
     { parse_mode: "Markdown" }
   );
 });
@@ -152,7 +197,10 @@ bot.callbackQuery("tasks", async (ctx) => {
     await ctx.reply("📝 अभी कोई task उपलब्ध नहीं है. बाद में चेक करें.");
   } else {
     const list = tasks.map((t, i) => `${i + 1}. ${t}`).join("\n");
-    await ctx.reply(`📝 *Available Tasks:*\n${list}\n\n(पूरा करने के बाद proof भेजें – admin verify करेगा)`, { parse_mode: "Markdown" });
+    await ctx.reply(
+      `📝 *Available Tasks:*\n${list}\n\n(पूरा करने के बाद proof भेजें – admin verify करेगा)`,
+      { parse_mode: "Markdown" }
+    );
   }
 });
 
